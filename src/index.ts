@@ -19,6 +19,7 @@ import {
   publishEvent,
   listTargets,
   scoreTarget,
+  scoreForRank,
 } from "./nostr.ts";
 
 // Soft house rule, surfaced in the write-tool descriptions.
@@ -27,9 +28,9 @@ const HOUSE_RULE =
   "try to leave private non-public individuals out of it.";
 
 // Cap leaderboard COUNT work to stay inside Worker subrequest limits (free plan: 50 subrequests
-// per invocation). Each COUNT can retry a 2nd relay if the first doesn't answer, so worst case is
-// 2x this — keep it at 20 (<=40 outbound) to stay safely under the 50 cap.
-const LEADERBOARD_COUNT_CAP = 20;
+// per invocation). listTargets unions ~5 relays (5 subrequests), then each candidate is ONE
+// scoreForRank subrequest, so 40 candidates ~= 45 outbound, under the 50 cap.
+const LEADERBOARD_COUNT_CAP = 40;
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
@@ -150,14 +151,20 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Record<string, n
           return text("No targets to rank right now.");
         }
         const scored = await Promise.all(
-          candidates.map(async (t) => ({ text: t.text, count: await scoreTarget(t.id) }))
+          candidates.map(async (t) => ({ text: t.text, count: await scoreForRank(t.id) }))
         );
         scored.sort((a, b) => b.count - a.count);
         const top = scored.slice(0, topN);
         const lines = top
           .map((t, i) => `${i + 1}. ${t.text} — ${t.count} 💥`)
           .join("\n");
-        return text(`Most-blamed (top ${top.length}):\n${lines}`);
+        // Honesty: we only COUNT a bounded sample of current targets (subrequest budget), so a
+        // less-active high-count target can be missed. Use `score` for an exact single number.
+        const note =
+          candidates.length >= LEADERBOARD_COUNT_CAP
+            ? `\n\n(ranked from a sample of ${candidates.length} current targets, so an older high-count one can be missed — ask me to \`score\` a specific target for its exact count.)`
+            : "";
+        return text(`Most-blamed (top ${top.length}):\n${lines}${note}`);
       }
     );
   }

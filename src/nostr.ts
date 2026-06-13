@@ -21,8 +21,21 @@ export const RELAYS = [
   "wss://relay.nostr.net",
 ] as const;
 
-// Relays that reliably answer NIP-45 COUNT. Reads (score/leaderboard) only use these.
-export const COUNT_RELAYS = ["wss://relay.damus.io", "wss://nos.lol"] as const;
+// All our relays answer NIP-45 COUNT, but their counts DIVERGE: relay.damus.io is often a
+// degraded/partial view (e.g. 66 votes for a target the other four all report ~1319). The web
+// board reconciles this by MAX-merging COUNT across every relay (store.svelte.ts onCount), so a
+// single target's score is the highest count any relay reports. We mirror that here.
+//
+// For a single score() we COUNT all relays and take the max (accurate, 5 subrequests). For the
+// leaderboard we can't afford 5x per target under the 50-subrequest/invocation free-tier cap, so
+// we COUNT each candidate on the "rich" relays only (damus excluded as the known laggard) and
+// take the first answer — which matches the board because those four agree closely.
+export const RANK_RELAYS = [
+  "wss://nos.lol",
+  "wss://nostr.mom",
+  "wss://relay.nostr.net",
+  "wss://relay.snort.social",
+] as const;
 
 export const TAG = "pureblameapp";
 
@@ -234,13 +247,24 @@ async function listFromRelay(
   });
 }
 
-// List targets, trying relays in order until one returns results (or all are exhausted).
+// List targets as the UNION across all relays, deduped by id — no single relay (especially the
+// degraded damus) has the full set, so we merge them. Each relay is capped at `limit`; the merged
+// result is sliced to `limit`.
 export async function listTargets(limit = 50, timeoutMs = 4000): Promise<Target[]> {
-  for (const url of RELAYS) {
-    const res = await listFromRelay(url, limit, timeoutMs);
-    if (res.length > 0) return res;
+  const perRelay = await Promise.all(
+    RELAYS.map((url) => listFromRelay(url, limit, timeoutMs))
+  );
+  const seen = new Set<string>();
+  const merged: Target[] = [];
+  for (const list of perRelay) {
+    for (const t of list) {
+      if (!seen.has(t.id)) {
+        seen.add(t.id);
+        merged.push(t);
+      }
+    }
   }
-  return [];
+  return merged.slice(0, limit);
 }
 
 // COUNT votes (kind 7) on a target via NIP-45, trying COUNT-capable relays until one answers.
@@ -298,11 +322,21 @@ async function countFromRelay(
   });
 }
 
-// Vote count for a target. Tries COUNT-capable relays in order; returns 0 if none answer.
+// Vote count for ONE target — the accurate path. COUNT every relay in parallel and take the
+// max, mirroring the web board's max-merge (relays diverge; the highest is the truth). 5
+// subrequests; only used for single score() lookups, not the leaderboard.
 export async function scoreTarget(targetId: string, timeoutMs = 4000): Promise<number> {
-  for (const url of COUNT_RELAYS) {
-    const n = await countFromRelay(url, targetId, timeoutMs);
-    if (n !== null) return n;
-  }
-  return 0;
+  const counts = await Promise.all(
+    RELAYS.map((url) => countFromRelay(url, targetId, timeoutMs))
+  );
+  return counts.reduce<number>((max, n) => (n !== null && n > max ? n : max), 0);
+}
+
+// Cheaper count for the leaderboard: ONE COUNT against a single rich relay (the first RANK relay,
+// nos.lol — damus excluded as the laggard). Exactly one subrequest per target and NO retry, so
+// the leaderboard's budget is hard-bounded (list-union ~5 + N candidates). The rich relays agree,
+// so this matches the board; if that one relay is briefly down a leaderboard run just reads low.
+export async function scoreForRank(targetId: string, timeoutMs = 4000): Promise<number> {
+  const n = await countFromRelay(RANK_RELAYS[0], targetId, timeoutMs);
+  return n ?? 0;
 }
