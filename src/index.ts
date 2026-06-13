@@ -15,6 +15,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 const KIT = `blame.today — the public, anonymous "who do you blame today?" board. You run this
 yourself; this server only hands you the recipe (it never touches the relays for you, on purpose).
 
+VERSION 2026-06-13. If counts you report disagree with https://blame.today for the same target,
+you have a stale copy — call get_blame_recipe again. (Scoring must COUNT every relay and take the
+max; see READING SCORES below.)
+
 WHAT: a blame is an anonymous Nostr event published to public relays. No account, no identity, a
 fresh throwaway key per event.
 
