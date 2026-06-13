@@ -10,8 +10,13 @@
   "ratelimits": [
     {
       "name": "RL",
-      "namespace_id": "1001",
+      "namespace_id": "7731",
       "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "RL_GLOBAL",
+      "namespace_id": "7732",
+      "simple": { "limit": 120, "period": 60 }
     }
   ],
   "durable_objects": {

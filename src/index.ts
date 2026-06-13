@@ -91,14 +91,20 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
       // Per-IP rate limit so one source can't loop on the endpoint and chew the account budget.
-      // Per-IP rate limit so one source can't loop on the endpoint and chew the account budget.
-      // NOTE: the native ratelimit binding deploys on the free plan but does NOT enforce there
-      // (verified: 0 denials at limit 3). It activates on the Workers Paid plan; until then this
-      // gate is a no-op and the protection is the pointer design itself (every call is a tiny,
-      // non-amplifying static response).
+      // Two rate limits, both must pass:
+      //  - RL (per-IP, 30/60s): stops a single source looping on the endpoint.
+      //  - RL_GLOBAL (all callers, 120/60s = 2/s): a ceiling on TOTAL throughput. 2/s * a month is
+      //    ~5M requests, well under the Workers Paid included 10M/month, so even a sustained
+      //    distributed attack can't push the bill past the $5 base. This is the real "cap" —
+      //    Cloudflare has no hard billing kill-switch for Workers, so we cap volume instead.
+      // GOTCHA learned the hard way: each ratelimit binding's `namespace_id` must be UNIQUE on the
+      // account. Reusing the docs' example "1001" silently no-ops (limit() always returns success).
+      // The limiter is also approximate (a fast burst slips a few through; sustained abuse gets
+      // throttled), and the pointer design is the backstop: every call is a tiny static response.
       const ip = request.headers.get("cf-connecting-ip") ?? "anon";
-      const { success } = await env.RL.limit({ key: ip });
-      if (!success) {
+      const perIp = await env.RL.limit({ key: ip });
+      const global = await env.RL_GLOBAL.limit({ key: "all" });
+      if (!perIp.success || !global.success) {
         return new Response("Rate limited — slow down. blame.today is a self-serve recipe, not a hot path.", {
           status: 429,
           headers: { "content-type": "text/plain", "retry-after": "60" },
