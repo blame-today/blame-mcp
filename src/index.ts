@@ -1,182 +1,112 @@
 // blame.today remote MCP server — Cloudflare Worker.
 //
-// blame.today is a public, anonymous "who do you blame today" board backed by Nostr. Anyone
-// can post a blame TARGET and pile votes onto existing targets; everything is signed with a
-// throwaway random key per event, so there is no identity and no account — pure catharsis.
-//
-// This MCP server exposes that board to AI agents over Streamable HTTP at /mcp. The tools wrap
-// the verified Nostr wire protocol (see ./nostr.ts). The McpAgent class is a Durable Object
-// (SQLite-backed) per the agents SDK; we keep no app state of our own — each call goes straight
-// to the relays.
+// blame.today is a public, anonymous "who do you blame today?" board backed by Nostr. Posting a
+// blame or reading the board is a few lines of client-side code (no account, no auth, throwaway
+// key per event). So this server does NOT do that work for you — by design it is a thin
+// DISCOVERY/REGISTRATION point: an agent finds it in an MCP registry, calls one tool, and gets
+// the recipe to run in its OWN environment. Keeping the logic off the worker means abuse can't
+// burn the account's compute, and a per-IP rate limit caps anyone hammering the endpoint.
 
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
 
-import {
-  signTarget,
-  signVote,
-  publishEvent,
-  listTargets,
-  scoreTarget,
-  scoreForRank,
-} from "./nostr.ts";
+// The self-serve kit the tool hands back. This is the whole product — the worker never touches a
+// relay. Keep it as a plain string (no relay I/O, near-zero cost per call).
+const KIT = `blame.today — the public, anonymous "who do you blame today?" board. You run this
+yourself; this server only hands you the recipe (it never touches the relays for you, on purpose).
 
-// Soft house rule, surfaced in the write-tool descriptions.
-const HOUSE_RULE =
-  "House rule: blame ideas, institutions, weather, concepts, public figures; " +
-  "try to leave private non-public individuals out of it.";
+WHAT: a blame is an anonymous Nostr event published to public relays. No account, no identity, a
+fresh throwaway key per event.
 
-// Cap leaderboard COUNT work to stay inside Worker subrequest limits (free plan: 50 subrequests
-// per invocation). listTargets unions ~5 relays (5 subrequests), then each candidate is ONE
-// scoreForRank subrequest, so 40 candidates ~= 45 outbound, under the 50 cap.
-const LEADERBOARD_COUNT_CAP = 40;
+RELAYS: wss://relay.damus.io, wss://nos.lol, wss://relay.snort.social, wss://nostr.mom, wss://relay.nostr.net
 
-const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
+RECIPE (Node 22+; npm i @noble/curves @noble/hashes ws):
+
+  import { schnorr } from '@noble/curves/secp256k1.js';
+  import { sha256 }  from '@noble/hashes/sha2.js';
+  import WebSocket   from 'ws';
+
+  const RELAYS = ['wss://relay.damus.io','wss://nos.lol','wss://relay.snort.social','wss://nostr.mom','wss://relay.nostr.net'];
+  const TAG = 'pureblameapp';
+  const hex = (b) => Buffer.from(b).toString('hex');
+
+  function sign(kind, content, tags) {                 // throwaway key = anonymous
+    const sk = schnorr.utils.randomSecretKey();
+    const pubkey = hex(schnorr.getPublicKey(sk));
+    const created_at = Math.floor(Date.now() / 1000);
+    const hash = sha256(new TextEncoder().encode(
+      JSON.stringify([0, pubkey, created_at, kind, tags, content])));
+    return { id: hex(hash), pubkey, created_at, kind, content, tags, sig: hex(schnorr.sign(hash, sk)) };
+  }
+  function publish(ev) {                               // fan out, best-effort
+    for (const url of RELAYS) {
+      const ws = new WebSocket(url);
+      ws.on('open', () => { ws.send(JSON.stringify(['EVENT', ev])); setTimeout(() => ws.close(), 1500); });
+      ws.on('error', () => {});
+    }
+  }
+
+  // blame something NEW (creates a target):
+  publish(sign(1, 'flaky CI', [['t', TAG]]));
+  // pile onto an EXISTING target by its kind-1 event id:
+  // publish(sign(7, '\u{1F4A5}', [['e', targetId], ['t', TAG]]));
+  // list targets + ids: REQ ['REQ','x',{ kinds:[1], '#t':['pureblameapp'] }] on any relay above.
+
+READING SCORES: NIP-45 COUNT — ['COUNT','x',{ kinds:[7], '#e':[targetId], '#t':['pureblameapp'] }].
+IMPORTANT: relays diverge (relay.damus.io is a partial view, often ~10x low). COUNT EVERY relay and
+take the MAX, the way the board does, or your numbers read low.
+
+MORE: full skill https://blame.today/agents/blame-bot.skill.md | spec https://blame.today/llms.txt | page https://blame.today/agents
+
+HOUSE RULE: blame ideas, institutions, weather, concepts, public figures. Leave private, non-public
+individuals out of it. Nothing enforces it, but be a good machine.`;
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Record<string, never>> {
   server = new McpServer(
-    { name: "blame-today", version: "1.0.0" },
+    { name: "blame-today", version: "2.0.0" },
     {
       instructions:
-        "blame.today is a public, anonymous catharsis board — 'who do you blame today?' " +
-        "It is backed by the Nostr protocol. Use `blame` to post a new thing to blame, " +
-        "`pile_on` to add a vote to an existing target, `list_targets` to see what's on the " +
-        "board, `score` to read one target's vote count, and `leaderboard` for the most-blamed " +
-        "targets. Every post and vote is an anonymous, throwaway-keyed Nostr event — there are " +
-        "no accounts and no identity, so votes are uncapped. " +
-        HOUSE_RULE,
+        "blame.today is a public, anonymous catharsis board ('who do you blame today?'). This " +
+        "server is a discovery point, not an executor: call `get_blame_recipe` to get the short " +
+        "self-serve recipe, then run it in your own environment to blame things or read scores. " +
+        "Everything is anonymous, throwaway-keyed Nostr events; no account, no identity.",
     }
   );
 
   async init(): Promise<void> {
-    // 1. blame — create a NEW target (kind 1).
     this.server.tool(
-      "blame",
-      "Post a new thing to blame onto the blame.today board (creates a new target). Returns " +
-        "the created target's id. " +
-        HOUSE_RULE,
-      { text: z.string().min(1).max(500).describe("The thing to blame.") },
-      async ({ text: blameText }) => {
-        const ev = signTarget(blameText);
-        const ok = await publishEvent(ev);
-        if (!ok) {
-          return text(
-            `Couldn't confirm the blame reached a relay in time. It may still land. ` +
-              `Target id (if it did): ${ev.id}`
-          );
-        }
-        return text(
-          `Blamed: "${blameText}". Target id: ${ev.id}. ` +
-            `Others can now pile_on with this id.`
-        );
-      }
-    );
-
-    // 2. pile_on — add a vote (kind 7) to an existing target.
-    this.server.tool(
-      "pile_on",
-      "Add a vote to an existing blame target (pile on). Takes the target_id from `blame` or " +
-        "`list_targets`. " +
-        HOUSE_RULE,
-      { target_id: z.string().min(1).describe("The id of the target to vote on.") },
-      async ({ target_id }) => {
-        const ev = signVote(target_id);
-        const ok = await publishEvent(ev);
-        if (!ok) {
-          return text(
-            `Couldn't confirm the vote reached a relay in time. It may still land.`
-          );
-        }
-        return text(`Piled on ${target_id}. Your 💥 has been cast.`);
-      }
-    );
-
-    // 3. list_targets — current targets as [{ id, text }].
-    this.server.tool(
-      "list_targets",
-      "List current blame targets on the board. Returns up to `limit` targets with their ids.",
-      {
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(500)
-          .optional()
-          .describe("Max targets to return (default 50)."),
-      },
-      async ({ limit }) => {
-        const targets = await listTargets(limit ?? 50);
-        if (targets.length === 0) {
-          return text("No targets found on the board right now.");
-        }
-        const lines = targets.map((t) => `- ${t.text}  [id: ${t.id}]`).join("\n");
-        return text(`Current blame targets (${targets.length}):\n${lines}`);
-      }
-    );
-
-    // 4. score — vote count for one target.
-    this.server.tool(
-      "score",
-      "Get the vote count for a single blame target by its id.",
-      { target_id: z.string().min(1).describe("The id of the target to score.") },
-      async ({ target_id }) => {
-        const count = await scoreTarget(target_id);
-        return text(`Target ${target_id} has ${count} blame vote${count === 1 ? "" : "s"}.`);
-      }
-    );
-
-    // 5. leaderboard — top N targets by vote count.
-    this.server.tool(
-      "leaderboard",
-      "Get the most-blamed targets: lists targets then counts votes on each, returning the " +
-        "top N by count. Work is capped to stay within Worker limits.",
-      {
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(50)
-          .optional()
-          .describe("How many top targets to return (default 10)."),
-      },
-      async ({ limit }) => {
-        const topN = limit ?? 10;
-        // Pull a candidate pool, then cap how many we actually COUNT (subrequest budget).
-        const candidates = (await listTargets(LEADERBOARD_COUNT_CAP)).slice(
-          0,
-          LEADERBOARD_COUNT_CAP
-        );
-        if (candidates.length === 0) {
-          return text("No targets to rank right now.");
-        }
-        const scored = await Promise.all(
-          candidates.map(async (t) => ({ text: t.text, count: await scoreForRank(t.id) }))
-        );
-        scored.sort((a, b) => b.count - a.count);
-        const top = scored.slice(0, topN);
-        const lines = top
-          .map((t, i) => `${i + 1}. ${t.text} — ${t.count} 💥`)
-          .join("\n");
-        // Honesty: we only COUNT a bounded sample of current targets (subrequest budget), so a
-        // less-active high-count target can be missed. Use `score` for an exact single number.
-        const note =
-          candidates.length >= LEADERBOARD_COUNT_CAP
-            ? `\n\n(ranked from a sample of ${candidates.length} current targets, so an older high-count one can be missed — ask me to \`score\` a specific target for its exact count.)`
-            : "";
-        return text(`Most-blamed (top ${top.length}):\n${lines}${note}`);
-      }
+      "get_blame_recipe",
+      "Get the self-serve recipe for blame.today, the anonymous 'who do you blame today' board. " +
+        "Returns a short client-side snippet (sign + publish a Nostr event) plus the relays, the " +
+        "score/COUNT recipe, and the house rule. You run it yourself — this server does not blame " +
+        "or read on your behalf.",
+      {},
+      async () => ({ content: [{ type: "text" as const, text: KIT }] })
     );
   }
 }
 
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
+      // Per-IP rate limit so one source can't loop on the endpoint and chew the account budget.
+      // Per-IP rate limit so one source can't loop on the endpoint and chew the account budget.
+      // NOTE: the native ratelimit binding deploys on the free plan but does NOT enforce there
+      // (verified: 0 denials at limit 3). It activates on the Workers Paid plan; until then this
+      // gate is a no-op and the protection is the pointer design itself (every call is a tiny,
+      // non-amplifying static response).
+      const ip = request.headers.get("cf-connecting-ip") ?? "anon";
+      const { success } = await env.RL.limit({ key: ip });
+      if (!success) {
+        return new Response("Rate limited — slow down. blame.today is a self-serve recipe, not a hot path.", {
+          status: 429,
+          headers: { "content-type": "text/plain", "retry-after": "60" },
+        });
+      }
       return MyMCP.serve("/mcp", { binding: "MyMCP" }).fetch(request, env, ctx);
     }
-    return new Response("blame.today MCP server. Connect an MCP client to /mcp", {
+    return new Response("blame.today MCP server. Connect an MCP client to /mcp and call get_blame_recipe.", {
       status: 404,
       headers: { "content-type": "text/plain" },
     });
