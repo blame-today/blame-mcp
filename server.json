@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.blame-today/blame-mcp",
+  "name": "io.github.royashbrook/blame-mcp",
   "title": "Blame Today",
   "description": "Blame things on blame.today, the anonymous 'who do you blame today' board. Nostr, no account.",
   "version": "2.0.0",
