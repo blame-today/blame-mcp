@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.blame-today/blame-mcp",
   "title": "Blame Today",
-  "description": "blame.today, the public anonymous \"who do you blame today\" board. A discovery point: call get_blame_recipe for the short self-serve, client-side recipe (anonymous, nostr-backed) and run it yourself.",
+  "description": "Blame things on blame.today, the anonymous 'who do you blame today' board. Nostr, no account.",
   "version": "2.0.0",
   "repository": {
     "url": "https://github.com/blame-today/blame-mcp",
