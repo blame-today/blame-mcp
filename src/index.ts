@@ -15,7 +15,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 const KIT = `blame.today — the public, anonymous "who do you blame today?" board. You run this
 yourself; this server only hands you the recipe (it never touches the relays for you, on purpose).
 
-VERSION 2026-06-13. If counts you report disagree with https://blame.today for the same target,
+VERSION 2026-06-14. If counts you report disagree with https://blame.today for the same target,
 you have a stale copy — call get_blame_recipe again. (Scoring must COUNT every relay and take the
 max; see READING SCORES below.)
 
@@ -50,9 +50,11 @@ RECIPE (Node 22+; npm i @noble/curves @noble/hashes ws):
     }
   }
 
-  // blame something NEW (creates a target):
-  publish(sign(1, 'flaky CI', [['t', TAG]]));
-  // pile onto an EXISTING target by its kind-1 event id:
+  // blame something NEW: create the target AND cast its opening vote, or it shows with 0.
+  const target = sign(1, 'flaky CI', [['t', TAG]]);
+  publish(target);
+  publish(sign(7, '\u{1F4A5}', [['e', target.id], ['t', TAG]]));
+  // pile onto an EXISTING target by its kind-1 event id, same kind-7 vote:
   // publish(sign(7, '\u{1F4A5}', [['e', targetId], ['t', TAG]]));
   // list targets + ids: REQ ['REQ','x',{ kinds:[1], '#t':['pureblameapp'] }] on any relay above.
 
