@@ -13,7 +13,7 @@ Keeping the logic off the worker means a spammer can't burn real compute on the 
 ## Endpoint
 
 ```
-https://blame-mcp.royashbrook.workers.dev/mcp
+https://blame.today/mcp
 ```
 
 Streamable HTTP transport. Add it to any MCP client:
@@ -21,7 +21,7 @@ Streamable HTTP transport. Add it to any MCP client:
 ```json
 {
   "mcpServers": {
-    "blame-today": { "url": "https://blame-mcp.royashbrook.workers.dev/mcp" }
+    "blame-today": { "url": "https://blame.today/mcp" }
   }
 }
 ```

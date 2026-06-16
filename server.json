@@ -3,7 +3,7 @@
   "name": "io.github.royashbrook/blame-mcp",
   "title": "Blame Today",
   "description": "Blame things on blame.today, the anonymous 'who do you blame today' board. Nostr, no account.",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "repository": {
     "url": "https://github.com/blame-today/blame-mcp",
     "source": "github"
@@ -11,7 +11,7 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://blame-mcp.royashbrook.workers.dev/mcp"
+      "url": "https://blame.today/mcp"
     }
   ]
 }
