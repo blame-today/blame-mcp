@@ -1,0 +1,46 @@
+name: Publish to MCP Registry
+
+# server.json is static metadata for the remote server at https://blame.today/mcp. Re-publish when
+# that file changes (bump its `version`). Domain ownership is proven by the apex TXT record on
+# blame.today (managed in blame-web/infra via OpenTofu); this workflow only needs the Ed25519
+# signing key, kept as the MCP_DNS_PRIVATE_KEY repo secret.
+on:
+  push:
+    branches: [main]
+    paths: ['server.json']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Skip if this version is already published
+        id: guard
+        run: |
+          LOCAL=$(jq -r .version server.json)
+          PUBLISHED=$(curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=blame" \
+            | jq -r --arg v "$LOCAL" '[.servers[] | select(.server.name=="today.blame/blame-mcp" and .server.version==$v)] | length')
+          if [ "$PUBLISHED" != "0" ]; then
+            echo "today.blame/blame-mcp version $LOCAL is already published — nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to MCP Registry (DNS)
+        if: steps.guard.outputs.skip == 'false'
+        run: ./mcp-publisher login dns --domain blame.today --private-key "${{ secrets.MCP_DNS_PRIVATE_KEY }}"
+
+      - name: Validate and publish
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          ./mcp-publisher validate
+          ./mcp-publisher publish
